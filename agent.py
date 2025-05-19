@@ -1,7 +1,9 @@
+# import os
 import re
 import argparse
 import pandas as pd
 import os
+import json
 from dotenv import load_dotenv
 # Use langchain-openai for LLMs per deprecation guidance
 from langchain_openai import OpenAI
@@ -21,14 +23,11 @@ def list_pathway_drugs_clean(pathway_input: str):
     Cleans input to extract the KEGG pathway ID (e.g., hsa04012) and prefixes with 'path:'
     before calling the tool.
     """
-    # Remove any surrounding text (like parentheses) and whitespace
     cleaned = pathway_input.strip()
-    # Attempt to extract the core ID (3 letters + 5 digits)
     match = re.search(r"[a-z]{3}\d{5}", cleaned, flags=re.IGNORECASE)
     if not match:
         raise ValueError(f"Could not parse KEGG pathway ID from input: {pathway_input}")
     pid = match.group(0).lower()
-    # Prefix with 'path:' as required by the KEGG tool
     kegg_id = f"path:{pid}"
     return list_pathway_drugs(kegg_id)
 
@@ -58,51 +57,47 @@ agent = initialize_agent(
     verbose=True
 )
 
-# Step 5a: Define a helper to interact with your agent
+# Step 5: Agentic batch processing of pathways from a CSV
 
-def ask_agent(prompt: str):
+def batch_process_agentic(csv_path: str):
     """
-    Ask a free-text question and let the agent choose tools.
-    """
-    return agent.run(prompt)
-
-# Step 5b: Batch-process pathways from a CSV
-
-def batch_process_csv(csv_path: str):
-    """
-    Reads a CSV with a 'pathway_id' column and uses the tools to build a summary.
+    Reads a CSV with a 'pathway_id' column and uses the LangChain agent
+    to autonomously plan tool usage and return structured results.
+    Returns a pandas DataFrame of results.
     """
     df = pd.read_csv(csv_path)
     results = []
     for raw_id in df['pathway_id']:
+        prompt = (
+            f"For the KEGG pathway ID '{raw_id}', first use the 'list_pathway_drugs' tool to get associated drug IDs, "
+            "then for each drug ID use the 'get_drug_info' tool to fetch detailed metadata. "
+            "Return the result as a JSON object with keys 'pathway_id', 'drug_ids', and 'drug_details'."
+        )
         try:
-            drugs = list_pathway_drugs_clean(raw_id)
-            details = [get_drug_info(d) for d in drugs]
-            results.append({
-                'pathway_id': raw_id,
-                'drug_ids': drugs,
-                'drug_details': details
-            })
+            response = agent.run(prompt)
+            data = json.loads(response)
         except Exception as e:
-            results.append({
+            data = {
                 'pathway_id': raw_id,
-                'error': str(e)
-            })
+                'error': str(e),
+                'raw_response': response if 'response' in locals() else None
+            }
+        results.append(data)
     return pd.DataFrame(results)
 
-# Step 6: Command-line interface with default CSV
+# Step 6: Command-line interface with agentic batch process
 
 def main():
-    parser = argparse.ArgumentParser(description="Run KEGG agent or batch CSV processing")
+    parser = argparse.ArgumentParser(description="Run KEGG agent or agentic batch CSV processing")
     parser.add_argument('--csv', type=str, help="Path to input CSV with 'pathway_id' column")
     parser.add_argument('--prompt', type=str, help="Free-text prompt for the agent")
     args = parser.parse_args()
 
     csv_path = args.csv or 'pathways.csv'
     if args.prompt:
-        print(ask_agent(args.prompt))
+        print(agent.run(args.prompt))
     elif os.path.isfile(csv_path):
-        df_out = batch_process_csv(csv_path)
+        df_out = batch_process_agentic(csv_path)
         print(df_out.to_string(index=False))
     else:
         parser.print_help()
